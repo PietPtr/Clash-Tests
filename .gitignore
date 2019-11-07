@@ -1,3 +1,4 @@
 *.hi
 *.o
 clash-compiler-1.0
+vhdl/
