@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE BangPatterns #-}
 
 module RISC16 where
 
@@ -16,6 +17,7 @@ type Imm10 = Unsigned 10
 type PC = Unsigned 8
 type RegisterValue = Unsigned 16
 type RegisterBank = Vec 8 (RegisterValue)
+type Memory = Vec 256 (RegisterValue)
 
 data Instruction =
       ADD RegisterID RegisterID RegisterID
@@ -40,7 +42,6 @@ data BranchOperation = Branch | Jump deriving(Eq, Show)
 data MachineCode = MachineCode
     { aluOp     :: Operator
     , branchOp  :: Maybe BranchOperation
-    , doBranch  :: Bool
     , memOp     :: Maybe MemoryOperation
     , storeRegA :: Bool
     , regA      :: Unsigned 3
@@ -53,7 +54,7 @@ data MachineCode = MachineCode
 data State = State
     { pc :: PC
     , registers :: RegisterBank
-    , memory :: Vec 256 (Unsigned 16)
+    , memory :: Memory
     } deriving (Eq, Show)
 
 
@@ -90,7 +91,6 @@ nop :: MachineCode
 nop = MachineCode
     { aluOp     = Add
     , branchOp  = Nothing
-    , doBranch  = False
     , memOp     = Nothing
     , storeRegA = True
     , regA      = 0
@@ -108,32 +108,42 @@ decode instruction = case instruction of
     LUI     regA imm10      -> nop {regA=regA, imm10=imm10, aluOp=LoadUpperImm}
     SW      regA regB imm7  -> nop {regA=regA, regB=regB, imm7=imm7, memOp=Just Store, storeRegA=False}
     LW      regA regB imm7  -> nop {regA=regA, regB=regB, imm7=imm7, memOp=Just Load}
-    BEQ     regA regB imm7  -> nop {regA=regA, regB=regB, imm7=imm7, branchOp=Just Branch, doBranch=(regA == regB), storeRegA=False}
-    JALR    regA regB       -> nop {regA=regA, regB=regB, branchOp=Just Jump, doBranch=True, aluOp=Link}
+    BEQ     regA regB imm7  -> nop {regA=regA, regB=regB, imm7=imm7, branchOp=Just Branch, storeRegA=False}
+    JALR    regA regB       -> nop {regA=regA, regB=regB, branchOp=Just Jump, aluOp=Link}
 
 risc16 :: State -> State
-risc16 state = trace (show (machineCode, registers')) state'
+risc16 state = trace (show (machineCode, registers', (parse (memory !! pc)))) state'
     where
         State{..}       = state
         machineCode     = decode $ parse $ memory !! pc
         MachineCode{..} = machineCode
 
-        calculatedValue = alu aluOp
-            (readRegister registers regB, readRegister registers regC, imm7, imm10, pc)
+        (a, b, c)       =
+            (readRegister registers regA,
+            readRegister registers regB,
+            readRegister registers regC)
 
-        pc'             = nextPC pc branchOp doBranch imm7 (readRegister registers regB)
+        aluValue        = alu aluOp
+            (readRegister registers regB, c, imm7, imm10, pc)
+
+        address         = agu b imm7
+        doBranch        = a == b || branchOp == Just Jump
+
+        loadValue       = load memOp (aluValue, memory !! address)
+
+        pc'             = nextPC branchOp (pc, doBranch, imm7, b)
         registers'      = if storeRegA
-            then loader registers regA calculatedValue
+            then loader registers regA loadValue
             else registers
-        memory'         = memory
+        memory'         = store memOp (memory, a, address)
 
         state'          = State {pc=pc', registers=registers', memory=memory'}
 
-nextPC :: PC -> Maybe BranchOperation -> Bool -> Imm7 -> RegisterValue -> PC
-nextPC pc Nothing _ _ _ = pc + 1
-nextPC pc (Just Branch) False _ _ = pc + 1
-nextPC pc (Just Branch) True imm7 _ = fromInteger $ (toInteger pc) + (toInteger imm7) + 1
-nextPC pc (Just Jump) _ imm7 reg = resize reg
+nextPC :: Maybe BranchOperation -> (PC, Bool, Imm7, RegisterValue) -> PC
+nextPC Nothing (pc, _, _, _) = pc + 1
+nextPC (Just Branch) (pc, False, _, _) = pc + 1
+nextPC (Just Branch) (pc, True, imm7, _) = fromInteger $ (toInteger pc) + (toInteger imm7) + 1
+nextPC (Just Jump) (pc, _, imm7, reg) = resize reg
 
 alu :: Operator -> (RegisterValue, RegisterValue, Imm7, Imm10, PC) -> RegisterValue
 alu Add (regB, regC, _, _, _) = regB + regC
@@ -143,23 +153,36 @@ alu LoadUpperImm (_, _, _, imm10, _) = shift (resize imm10) (6)
 alu Link (_, _, _, _, pc) = resize $ pc + 1
 
 loader :: RegisterBank -> RegisterID -> RegisterValue -> RegisterBank
+loader bank 0 value = bank
 loader bank register value = replace register value bank
 
 readRegister :: RegisterBank -> RegisterID -> RegisterValue
 readRegister bank 0 = 0
 readRegister bank regID = bank !! regID
 
--- mem :: MemoryOperation -> ()
+store :: Maybe MemoryOperation -> (Memory, RegisterValue, RegisterValue) -> Memory
+store Nothing (memory, _, _) = memory
+store (Just Load) (memory, _, _) = memory
+store (Just Store) (memory, a, address) = replace address a memory
+
+load :: Maybe MemoryOperation -> (RegisterValue, RegisterValue) -> RegisterValue
+load Nothing (aluResult, _) = aluResult
+load (Just Load) (_, memResult) = memResult
+load (Just Store) (aluResult, _) = aluResult
+
+agu :: RegisterValue -> Imm7 -> RegisterValue
+agu b imm7 = fromInteger $ (toInteger b) + (toInteger imm7)
+
 
 state :: State
 state = State
     { pc = 0
     , registers = 0:>0:>0:>0:>0:>0:>0:>0:>Nil
     , memory =
-        0x24b7:>0x293f:>0x8501:>0x6400:>0x6800:>0x6c00:>0x2932:>0x249e:>
-        0x0d01:>0x6400:>0x6800:>0x6c00:>0x248c:>0x290a:>0x4d01:>0x0000:>
-        0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>
-        0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>
+        0x2820:>0xe500:>0x6400:>0x6800:>0x6c00:>0x280a:>0x2400:>0x2481:>
+        0xc881:>0xc07d:>0xa500:>0x6400:>0x6800:>0x6c00:>0x24b7:>0x293f:>
+        0x8501:>0x6400:>0x6800:>0x6c00:>0x2932:>0x249e:>0x0d01:>0x6400:>
+        0x6800:>0x6c00:>0x248c:>0x290a:>0x4d01:>0x0000:>0x0000:>0x0000:>
         0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>
         0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>
         0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>
