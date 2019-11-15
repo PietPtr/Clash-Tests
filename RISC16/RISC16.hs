@@ -13,6 +13,7 @@ type OpCode = Unsigned 3
 type RegisterID = Unsigned 3
 type Imm7 = Signed 7
 type Imm10 = Unsigned 10
+type Tick = Signed 0
 
 type PC = Unsigned 8
 type RegisterValue = Unsigned 16
@@ -55,18 +56,14 @@ data State = State
     { pc :: PC
     , registers :: RegisterBank
     , memory :: Memory
-    } deriving (Eq, Show)
+    } deriving (Generic, NFDataX, Eq)
 
-
-
-x = parse (0b0001001000000111 :: Unsigned 16)
-y = parse (0b0011001000000111 :: Unsigned 16)
-z = parse (0b0101001000000111 :: Unsigned 16)
-a = parse (0b0111001000000111 :: Unsigned 16)
-b = parse (0b1001001000000111 :: Unsigned 16)
-c = parse (0b1011001000000111 :: Unsigned 16)
-d = parse (0b1101001000000111 :: Unsigned 16)
-e = parse (0b1111001000000111 :: Unsigned 16)
+instance Show State where
+    show state = L.unlines [pcStr, registersStr, memoryStr]
+        where
+            pcStr = show (pc state)
+            registersStr = show (registers state)
+            memoryStr = show (memory state)
 
 parse :: Unsigned 16 -> Instruction
 parse bits = case opcode of
@@ -111,8 +108,8 @@ decode instruction = case instruction of
     BEQ     regA regB imm7  -> nop {regA=regA, regB=regB, imm7=imm7, branchOp=Just Branch, storeRegA=False}
     JALR    regA regB       -> nop {regA=regA, regB=regB, branchOp=Just Jump, aluOp=Link}
 
-risc16 :: State -> State
-risc16 state = trace (show (machineCode, registers', (parse (memory !! pc)))) state'
+risc16 :: State -> Tick -> State
+risc16 state _ = state'
     where
         State{..}       = state
         machineCode     = decode $ parse $ memory !! pc
@@ -216,8 +213,21 @@ state = State
         0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>0x0000:>Nil
     }
 
-loop :: State -> Int -> [State]
-loop state 0 = []
-loop state n = state : (loop (risc16 state) (n - 1))
+-- loop :: State -> Int -> [State]
+-- loop state 0 = []
+-- loop state n = state : (loop (risc16 state) (n - 1))
+--
+-- epl n = mapM_ print $ loop state n
 
-epl n = mapM_ print $ loop state n
+
+mooreRISC16 = moore @System risc16 (\x -> x) state
+
+topEntity
+  :: Clock System
+  -> Reset System
+  -> Enable System
+  -> Signal System Tick
+  -> Signal System State
+topEntity = exposeClockResetEnable mooreRISC16
+
+sim n = mapM_ print $ L.take n $ simulate @System mooreRISC16 [1..]
